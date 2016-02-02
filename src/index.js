@@ -3,8 +3,6 @@ import React from 'react';
 import invariant from 'invariant';
 import easing from 'easing';
 
-// TODO : issue with multiple clics ...
-
 const noPx = [
   'animationIterationCount',
   'boxFlex',
@@ -34,17 +32,13 @@ const noPx = [
   'zoom',
 ];
 
-function isObject(χ) {
-  return !!χ && (typeof χ === 'object' || typeof χ === 'function');
-}
-
 function extractAnimatedValues(arr) {
   const values = [];
   arr.forEach(item => {
     for (const k in item) {
       if (item.hasOwnProperty(k)) {
         const tValue = item[k];
-        if (tValue.__animatedvalue) {
+        if (tValue.__driver) {
           return values.push(tValue);
         }
       }
@@ -53,13 +47,13 @@ function extractAnimatedValues(arr) {
   return values;
 }
 
-export function AnimatedValue(v) {
+export function animationDriver(v) {
   const listeners = [];
   let value = v;
   const initValue = v;
   let currentAnimation;
   return {
-    __animatedvalue: true,
+    __driver: true,
     currentAnimation(id) {
       if (id) {
         currentAnimation = id;
@@ -88,13 +82,7 @@ export function AnimatedValue(v) {
 }
 
 export function animate(value, options, callback) {
-  function stop() {
-    const { animationId, cb } = value.currentAnimation() || {};
-    window.cancelAnimationFrame(animationId);
-    if (cb) cb();
-  }
   invariant(options.hasOwnProperty('toValue'), 'You should specify a toValue options');
-  stop();
   const startValue = value.getValue();
   const stopValue = options.toValue;
   const steps = options.steps || 100;
@@ -103,7 +91,14 @@ export function animate(value, options, callback) {
   const stepWidth = Math.abs(stopValue - startValue) / steps;
   const easingRatio = steps / values.reduce((a, b) => a + b);
   let index = 0;
+  let stopped = false;
 
+  function stop() {
+    const { animationId, cb } = value.currentAnimation() || {};
+    window.cancelAnimationFrame(animationId);
+    if (!stopped && cb) cb();
+    stopped = true;
+  }
   function nextStep(val, from, to, idx) {
     if (to < from) {
       return val.getValue() - ((stepWidth * values[idx]) * easingRatio);
@@ -111,7 +106,8 @@ export function animate(value, options, callback) {
     return val.getValue() + ((stepWidth * values[idx]) * easingRatio);
   }
   function update() {
-    const newValue = (options.nextStep || nextStep)(value, startValue, stopValue, index, options);
+    const computeNextStep = options.nextStep || nextStep;
+    const newValue = computeNextStep(value, startValue, stopValue, index, options);
     index += 1;
     if (stopValue < startValue && newValue > stopValue) {
       value.setValue(newValue);
@@ -128,6 +124,7 @@ export function animate(value, options, callback) {
   }
   return {
     start() {
+      stop();
       update();
       return {
         stop,
@@ -137,7 +134,7 @@ export function animate(value, options, callback) {
   };
 }
 
-export const AnimatedDiv = React.createClass({
+export const Div = React.createClass({
   propTypes: {
     style: React.PropTypes.object.isRequired,
     children: React.PropTypes.oneOfType([
@@ -157,39 +154,32 @@ export const AnimatedDiv = React.createClass({
   },
   computeFirstStyle() {
     const newStyle = { ...this._style };
-    const infect = (what) => {
-      for (const key in what) {
-        if (what.hasOwnProperty(key)) {
-          const value = what[key];
-          if (value.__animatedvalue) {
-            what[key] = value.getValue();
-          } else if (key === 'transform') {
-            what[key] = value.map(transform => {
-              let result = '';
-              for (const k in transform) {
-                if (transform.hasOwnProperty(k)) {
-                  const tValue = transform[k];
-                  if (tValue.__animatedvalue) {
-                    result += `${k}(${tValue.getValue()})`;
-                  } else {
-                    result += `${k}(${tValue})`;
-                  }
+    for (const key in newStyle) {
+      if (newStyle.hasOwnProperty(key)) {
+        const value = newStyle[key];
+        if (value.__driver) {
+          newStyle[key] = value.getValue();
+        } else if (key === 'transform') {
+          newStyle[key] = value.map(transform => {
+            let result = '';
+            for (const k in transform) {
+              if (transform.hasOwnProperty(k)) {
+                const tValue = transform[k];
+                if (tValue.__driver) {
+                  result += `${k}(${tValue.getValue()})`;
+                } else {
+                  result += `${k}(${tValue})`;
                 }
               }
-              return result;
-            }).join(' ');
-          } else if (isObject(value)) {
-            infect(value);
-          } else if (Array.isArray(value)) {
-            infect(value);
-          }
+            }
+            return result;
+          }).join(' ');
         }
       }
-    };
-    infect(newStyle);
+    }
     return newStyle;
   },
-  listenToChanges(name, path, value) {
+  listenToChanges(name, value) {
     this.ref.style[name] = `${value}${noPx.indexOf(name) > -1 ? '' : 'px'}`;
   },
   listenToChangesInTransform(transformArray) {
@@ -198,7 +188,7 @@ export const AnimatedDiv = React.createClass({
       for (const k in transform) {
         if (transform.hasOwnProperty(k)) {
           const tValue = transform[k];
-          if (tValue.__animatedvalue) {
+          if (tValue.__driver) {
             result += `${k}(${tValue.getValue()})`;
           } else {
             result += `${k}(${tValue})`;
@@ -208,7 +198,7 @@ export const AnimatedDiv = React.createClass({
       return result;
     }).join(' ');
   },
-  subscribe(what, path) {
+  subscribe(what) {
     for (const key in what) {
       if (what.hasOwnProperty(key)) {
         const value = what[key];
@@ -220,12 +210,8 @@ export const AnimatedDiv = React.createClass({
             });
           }
         } else {
-          if (value.__animatedvalue) {
-            this.unsubscribe.push(value.subscribe(this.listenToChanges.bind(this, key, path)));
-          } else if (isObject(value)) {
-            this.subscribe(value, [...path, key]);
-          } else if (Array.isArray(value)) {
-            this.subscribe(value, [...path, key]);
+          if (value.__driver) {
+            this.unsubscribe.push(value.subscribe(this.listenToChanges.bind(this, key)));
           }
         }
       }
